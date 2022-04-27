@@ -27,7 +27,7 @@ var disableExperimentWarnings = ""
 // the experiments are known before we process the result of the module config,
 // and thus we can take into account which experiments are active when deciding
 // how to decode.
-func sniffActiveExperiments(body hcl.Body) (experiments.Set, hcl.Diagnostics) {
+func sniffActiveExperiments(body hcl.Body, allowed bool) (experiments.Set, hcl.Diagnostics) {
 	rootContent, _, diags := body.PartialContent(configFileTerraformBlockSniffRootSchema)
 
 	ret := experiments.NewSet()
@@ -84,10 +84,42 @@ func sniffActiveExperiments(body hcl.Body) (experiments.Set, hcl.Diagnostics) {
 			continue
 		}
 
+		// FIXME: We currently have a special case below for the
+		// "module_variable_optional_attrs" experiment where it is allowed
+		// even when experiments are not generally allowed, because it was
+		// present before we introduced the rule that experiments are only
+		// available in alpha/development releases. Once that experiment
+		// has concluded (and there has been sufficient time for participants
+		// in the experiment to have seen the conclusion message) we can
+		// simplify this to just fail immediately if the experiments
+		// attribute exists when it's not allowed, and not bother trying
+		// to decode at all.
+
 		exps, expDiags := decodeExperimentsAttr(attr)
-		diags = append(diags, expDiags...)
-		if !expDiags.HasErrors() {
-			ret = experiments.SetUnion(ret, exps)
+		if allowed {
+			diags = append(diags, expDiags...)
+			if !expDiags.HasErrors() {
+				ret = experiments.SetUnion(ret, exps)
+			}
+		} else {
+			// NOTE: we intentionally ignore expDiags here unless
+			// module_variable_optional_attrs is the only experiment, because
+			// we want to behave as if we didn't even try to parse the
+			// experiments when not enabled aside from that special case.
+			if len(exps) == 1 && exps.Has(experiments.ModuleVariableOptionalAttrs) {
+				diags = append(diags, expDiags...)
+				if !expDiags.HasErrors() {
+					ret.Add(experiments.ModuleVariableOptionalAttrs)
+				}
+				continue
+			}
+
+			diags = diags.Append(&hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  "Module uses experimental features",
+				Detail:   "Experimental features are intended only for gathering early feedback on new language designs, and so are available only in alpha releases of Terraform.",
+				Subject:  attr.NameRange.Ptr(),
+			})
 		}
 	}
 
@@ -142,12 +174,27 @@ func decodeExperimentsAttr(attr *hcl.Attribute) (experiments.Set, hcl.Diagnostic
 				// folks aren't inadvertently using them in places where that'd be
 				// inappropriate, particularly if the experiment is active in a
 				// shared module they depend on.
-				diags = diags.Append(&hcl.Diagnostic{
-					Severity: hcl.DiagWarning,
-					Summary:  fmt.Sprintf("Experimental feature %q is active", exp.Keyword()),
-					Detail:   "Experimental features are subject to breaking changes in future minor or patch releases, based on feedback.\n\nIf you have feedback on the design of this feature, please open a GitHub issue to discuss it.",
-					Subject:  expr.Range().Ptr(),
-				})
+				if exp == experiments.ModuleVariableOptionalAttrs {
+					// FIXME: This particular feature is available even in
+					// non-alpha releases because it predated us making this
+					// restriction. Therefore we'll preserve the old version of
+					// this warning just until this experiment is concluded,
+					// after which we can remove this special case and just
+					// use the other warning below in all cases.
+					diags = diags.Append(&hcl.Diagnostic{
+						Severity: hcl.DiagWarning,
+						Summary:  fmt.Sprintf("Experimental feature %q is active", exp.Keyword()),
+						Detail:   "This experimental feature is subject to breaking changes in future minor or patch releases of Terraform, based on feedback.\n\nIf you have feedback on the design of this feature, please open a GitHub issue to discuss it.",
+						Subject:  expr.Range().Ptr(),
+					})
+				} else {
+					diags = diags.Append(&hcl.Diagnostic{
+						Severity: hcl.DiagWarning,
+						Summary:  fmt.Sprintf("Experimental feature %q is active", exp.Keyword()),
+						Detail:   "Experimental features are available only in alpha releases of Terraform and are subject to breaking changes or total removal in later versions, based on feedback. We recommend against using experimental features in production.\n\nIf you have feedback on the design of this feature, please open a GitHub issue to discuss it.",
+						Subject:  expr.Range().Ptr(),
+					})
+				}
 			}
 
 		default:
