@@ -115,6 +115,12 @@ func initCommands(
 			}, nil
 		},
 
+		"checks": func() (cli.Command, error) {
+			return &command.ChecksCommand{
+				Meta: meta,
+			}, nil
+		},
+
 		"console": func() (cli.Command, error) {
 			return &command.ConsoleCommand{
 				Meta: meta,
@@ -401,9 +407,9 @@ func initCommands(
 	}
 
 	HiddenCommands = map[string]struct{}{
-		"env":             struct{}{},
-		"internal-plugin": struct{}{},
-		"push":            struct{}{},
+		"env":             {},
+		"internal-plugin": {},
+		"push":            {},
 	}
 
 }
